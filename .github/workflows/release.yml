@@ -10,7 +10,9 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
+    outputs:
+      sha256: ${{ steps.sha256.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -25,8 +27,59 @@ jobs:
           chmod +x speedy-ocr
           tar czf speedy-ocr-macos-universal.tar.gz speedy-ocr
 
+      - name: Compute SHA256
+        id: sha256
+        run: |
+          SHA256=$(shasum -a 256 speedy-ocr-macos-universal.tar.gz | awk '{print $1}')
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: speedy-ocr-macos-universal.tar.gz
           generate_release_notes: true
+
+  update-homebrew:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: daiaoki/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Update formula
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SHA256="${{ needs.build.outputs.sha256 }}"
+          mkdir -p Formula
+          cat > Formula/speedy-ocr.rb << EOF
+          class SpeedyOcr < Formula
+            desc "Fast PDF OCR CLI tool powered by macOS Vision Framework"
+            homepage "https://github.com/daiaoki/speedy-ocr"
+            url "https://github.com/daiaoki/speedy-ocr/releases/download/${GITHUB_REF_NAME}/speedy-ocr-macos-universal.tar.gz"
+            sha256 "${SHA256}"
+            version "${VERSION}"
+            license "MIT"
+
+            depends_on :macos
+            depends_on macos: :ventura
+
+            def install
+              bin.install "speedy-ocr"
+            end
+
+            test do
+              assert_match "speedy-ocr", shell_output("#{bin}/speedy-ocr --help")
+            end
+          end
+          EOF
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/speedy-ocr.rb
+          git commit -m "Update speedy-ocr to ${GITHUB_REF_NAME}"
+          git push
